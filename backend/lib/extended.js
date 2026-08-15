@@ -1,6 +1,10 @@
 // Official Extended (x10) REST client — public + private (Stark-signed) endpoints.
 const stark = require('./stark')
 const proxy = require('./proxy')
+// Use undici's own fetch (not Node's global fetch): a ProxyAgent dispatcher must
+// come from the SAME undici as the fetch that consumes it, otherwise Node's
+// built-in fetch rejects it with "invalid onRequestStart method".
+const { fetch: httpFetch } = require('undici')
 
 const BASE = {
   mainnet: 'https://api.starknet.extended.exchange/api/v1',
@@ -31,7 +35,7 @@ async function request(environment, path, { method = 'GET', apiKey, body, query,
     try {
       const opts = { method, headers, body: body ? JSON.stringify(body) : undefined }
       if (dispatcher) opts.dispatcher = dispatcher
-      res = await fetch(url, opts)
+      res = await httpFetch(url, opts)
     } catch (e) {
       lastErr = new Error(`Extended ${method} ${path} -> network error: ${e.message}`)
       await sleep(250 * (attempt + 1))
@@ -309,7 +313,7 @@ async function checkOrderRegion(environment) {
       body: '{}',
     }
     if (dispatcher) opts.dispatcher = dispatcher
-    const res = await fetch(baseUrl(environment) + '/user/order', opts)
+    const res = await httpFetch(baseUrl(environment) + '/user/order', opts)
     return { blocked: res.status === 451, status: res.status }
   } catch (e) {
     return { blocked: false, status: 0, error: e.message }
