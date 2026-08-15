@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+dist/
+build/
+frontend/dist/
+backend/dist/
+
+# Environment / secrets — never commit real values
+.env
+.env.local
+.env.*.local
+*.local
+
+# Vulcan / dev-server internal state
+.vulcan/
+
+# Runtime data
+uploads/
+outputs/
+*.sqlite
+*.sqlite3
+*.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+
+# Claude local session state
+.claude/
