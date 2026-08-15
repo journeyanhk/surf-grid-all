@@ -20,7 +20,7 @@ async function exchangeCard(ex, environment) {
   }
   const cred = await getCredentials(ex.id, environment)
   const { rows } = await dbQuery(
-    `SELECT * FROM grid_configs WHERE exchange=$1 AND environment=$2 LIMIT 1`,
+    `SELECT * FROM grid_configs WHERE exchange=$1 AND environment=$2 ORDER BY id LIMIT 1`,
     [ex.id, environment]
   )
   const cfg = rows[0] || null
@@ -77,8 +77,11 @@ async function exchangeCard(ex, environment) {
 router.get('/', async (req, res) => {
   try {
     const environment = req.query.environment || (await getActiveEnvironment())
-    const cards = []
-    for (const ex of EXCHANGES) cards.push(await exchangeCard(ex, environment))
+    const all = []
+    for (const ex of EXCHANGES) all.push(await exchangeCard(ex, environment))
+    // Only surface exchanges the user has actually connected (live + credentials
+    // configured). Reserved / unconfigured exchanges stay hidden until set up.
+    const cards = all.filter((c) => c.implemented && c.configured)
     const running = cards.filter((c) => c.status === 'running').length
     const totalRealized = cards.reduce((a, c) => a + Number(c.grid?.realized_pnl || 0), 0)
     const totalVolume = cards.reduce((a, c) => a + Number(c.grid?.volume || 0), 0)
@@ -87,7 +90,7 @@ router.get('/', async (req, res) => {
       environment,
       cards,
       summary: {
-        implemented: EXCHANGES.filter((e) => e.live).length,
+        implemented: cards.length,
         running,
         totalRealized,
         totalVolume,

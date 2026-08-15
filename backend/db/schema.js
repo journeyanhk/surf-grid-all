@@ -8,6 +8,7 @@ const {
   integer,
   jsonb,
   doublePrecision,
+  uniqueIndex,
 } = require('drizzle-orm/pg-core')
 
 // Per-exchange + environment credentials (Extended requires apiKey, vault, stark keys).
@@ -78,7 +79,11 @@ exports.grid_configs = pgTable('grid_configs', {
   completed_grids: integer('completed_grids').default(0),
   started_at: timestamp('started_at'),
   updated_at: timestamp('updated_at').defaultNow(),
-})
+}, (t) => ({
+  // Exactly one config row per exchange+environment — prevents the duplicate
+  // rows that made the overview and detail panels read different statuses.
+  exchangeEnvUniq: uniqueIndex('grid_configs_exchange_env_uniq').on(t.exchange, t.environment),
+}))
 
 // Tracked grid orders currently working on the exchange.
 exports.grid_orders = pgTable('grid_orders', {

@@ -121,7 +121,14 @@ export default function Overview({ environment, onGo }: { environment: string; o
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {isLoading && !cards.length
           ? [0, 1, 2].map((i) => <Panel key={i} className="p-5 h-80 animate-pulse" />)
-          : cards.map((c: any) => <ExchangeCard key={c.id} card={c} onGo={onGo} />)}
+          : cards.length
+            ? cards.map((c: any) => <ExchangeCard key={c.id} card={c} onGo={onGo} />)
+            : (
+              <Panel className="p-8 lg:col-span-3 text-center">
+                <div className="text-[14px] text-slate-300 mb-1">尚未接入任何交易所</div>
+                <div className="text-[12px] text-slate-500">前往「配置」填写交易所 API 凭证后，将自动在此展示。</div>
+              </Panel>
+            )}
       </div>
 
       <Panel className="p-5">
