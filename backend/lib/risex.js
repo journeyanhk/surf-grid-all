@@ -177,25 +177,42 @@ async function getBalance(environment, cred) {
 
 async function getPositions(environment, cred) {
   const account = cred.account_address
-  const data = await request(environment, `/v1/positions?account=${account}`).catch(() => ({ positions: [] }))
+  const data = await request(environment, `/v1/positions?account=${account}&limit=500`).catch(() => ({ positions: [] }))
   const list = data?.positions || (Array.isArray(data) ? data : [])
-  return list.map(normalizePosition)
+  const out = []
+  for (const p of list) {
+    let stepSize = 1
+    try {
+      const meta = await getMarketMeta(environment, p.market_name || String(p.market_id))
+      stepSize = Number(meta.step_size) || 1
+    } catch { /* keep 1:1 if meta unavailable */ }
+    out.push(normalizePosition(p, stepSize))
+  }
+  return out
 }
-function normalizePosition(p) {
-  const size = Number(p.size ?? p.quantity ?? 0)
-  const signed = p.side === 1 || p.side === 'SHORT' || String(p.side).toLowerCase() === 'short' ? -Math.abs(size) : Math.abs(size)
+function normalizePosition(p, stepSize = 1) {
+  // RISEx returns position `size` as an int256 STRING in integer STEPS (lots),
+  // positive = long, negative = short. Convert to a human base-asset quantity by
+  // multiplying by the market's step_size. (Treating steps as the raw quantity is
+  // what made a small position balloon to ~2.1e9 size_steps on close → overflow.)
+  const rawSteps = Number(p.size ?? p.quantity ?? 0)
+  let signed = rawSteps * stepSize
+  // If size came through unsigned, fall back to the explicit side flag.
+  if (rawSteps >= 0 && (p.side === 1 || String(p.side).toLowerCase() === 'short')) {
+    signed = -Math.abs(signed)
+  }
   return {
-    market: p.market || p.config?.name || p.market_id,
+    market: p.market_name || p.market || p.config?.name || p.market_id,
     market_id: p.market_id,
     size: signed,
     unrealisedPnl: Number(p.unrealized_pnl ?? p.unrealised_pnl ?? p.uPnl ?? 0),
-    openPrice: Number(p.entry_price ?? p.avg_entry_price ?? p.open_price ?? 0),
+    openPrice: Number(p.avg_entry_price ?? p.entry_price ?? p.open_price ?? 0),
   }
 }
 
 async function getOpenOrders(environment, cred, market) {
   const account = cred.account_address
-  let path = `/v1/orders/open?account=${account}`
+  let path = `/v1/orders/open?account=${account}&limit=1000`
   if (market) {
     try { const meta = await getMarketMeta(environment, market); path += `&market_id=${meta.market_id}` } catch {}
   }
@@ -275,10 +292,21 @@ function encodeOrderData(p) {
   orderFlags |= (p.order_type & 1) << 5
   orderFlags |= (p.time_in_force & 3) << 6
   const headerVersion = 1
+  // Pack into a uint88. Use BigInt masking throughout: JavaScript's `&` operates
+  // on 32-bit SIGNED integers, so `size_steps & 0xffffffff` turns any value
+  // >= 2^31 NEGATIVE, corrupting the signed order hash (and later blowing up the
+  // ethers encoder with "value out-of-bounds"). Reject overflow up front so we
+  // never silently truncate or feed a negative into the signer.
+  const marketId = BigInt(p.market_id)
+  const sizeSteps = BigInt(p.size_steps)
+  const priceTicks = BigInt(p.price_ticks)
+  if (sizeSteps < 0n || sizeSteps > 0xffffffffn) throw new Error(`size_steps 越界（${sizeSteps}），超出 32 位可编码范围`)
+  if (priceTicks < 0n || priceTicks > 0xffffffn) throw new Error(`price_ticks 越界（${priceTicks}），超出 24 位可编码范围`)
+  if (marketId < 0n || marketId > 0xffffn) throw new Error(`market_id 越界（${marketId}）`)
   let data = 0n
-  data |= BigInt(p.market_id & 0xffff) << 70n
-  data |= BigInt(p.size_steps & 0xffffffff) << 38n
-  data |= BigInt(p.price_ticks & 0xffffff) << 14n
+  data |= (marketId & 0xffffn) << 70n
+  data |= (sizeSteps & 0xffffffffn) << 38n
+  data |= (priceTicks & 0xffffffn) << 14n
   data |= BigInt(orderFlags & 0xff) << 6n
   data |= BigInt((headerVersion & 0x1f) << 1)
   return data

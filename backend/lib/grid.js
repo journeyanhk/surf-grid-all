@@ -361,7 +361,8 @@ async function syncOrders(cfg, cred, params, runtime, price, netQ, { placeLimit 
         postOnly: true,
         reduceOnly: l.reduceOnly,
       })
-      const exchangeId = res?.data?.id || res?.data?.orderId || res?.data?.externalId || null
+      const exchangeId =
+        res.exchangeOrderId ?? res?.data?.id ?? res?.data?.orderId ?? res?.data?.externalId ?? null
       await dbQuery(
         `INSERT INTO grid_orders (config_id, level, side, price, qty, external_id, exchange_order_id, status)
          VALUES ($1,$2,$3,$4,$5,$6,$7,'open')`,
