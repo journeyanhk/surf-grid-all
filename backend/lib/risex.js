@@ -181,44 +181,50 @@ async function getPositions(environment, cred) {
   const list = data?.positions || (Array.isArray(data) ? data : [])
   const out = []
   for (const p of list) {
-    let stepSize = 1
     let markPrice = 0
+    let nameFallback = null
     try {
       const meta = await getMarketMeta(environment, p.market_name || String(p.market_id))
-      stepSize = Number(meta.step_size) || 1
+      // markets endpoint reports prices as plain human decimals (e.g. 62820.12)
       markPrice = Number(meta.markPrice) || 0
-    } catch { /* keep 1:1 if meta unavailable */ }
-    out.push(normalizePosition(p, stepSize, markPrice))
+      nameFallback = meta.name
+    } catch { /* leave mark/name empty if meta unavailable */ }
+    out.push(normalizePosition(p, markPrice, nameFallback))
   }
   return out
 }
-function normalizePosition(p, stepSize = 1, markFallback = 0) {
-  // RISEx returns position `size` as an int256 STRING in integer STEPS (lots),
-  // positive = long, negative = short. Convert to a human base-asset quantity by
-  // multiplying by the market's step_size. (Treating steps as the raw quantity is
-  // what made a small position balloon to ~2.1e9 size_steps on close → overflow.)
-  const rawSteps = Number(p.size ?? p.quantity ?? 0)
-  let signed = rawSteps * stepSize
-  // If size came through unsigned, fall back to the explicit side flag.
-  if (rawSteps >= 0 && (p.side === 1 || String(p.side).toLowerCase() === 'short')) {
-    signed = -Math.abs(signed)
-  }
-  const openPrice = Number(p.avg_entry_price ?? p.entry_price ?? p.open_price ?? 0)
-  const markPrice = Number(p.mark_price ?? p.markPrice ?? markFallback ?? 0)
-  // Use the exchange's uPnL when present; otherwise derive it from mark vs entry
-  // so the panel never shows a flat -0.00 just because the field was omitted.
-  let uPnl = Number(p.unrealized_pnl ?? p.unrealised_pnl ?? p.uPnl ?? 0)
-  if (!uPnl && signed && openPrice && markPrice) uPnl = (markPrice - openPrice) * signed
+
+const WAD = 1e18
+function normalizePosition(p, markFallback = 0, nameFallback = null) {
+  // RISEx positions return size AND all prices as WAD (1e18-scaled) decimal
+  // STRINGS — NOT integer steps of step_size (that mistake made a 0.003008 BTC
+  // position balloon to size_steps 3.008e15 on close → "越界"). `size` is signed
+  // (+long / −short); some endpoints carry an unsigned size + a `side` field
+  // (string "BUY"/"SELL" or int 0/1). Divide everything by 1e18 to get humans.
+  const rawSize = Number(p.size ?? p.quantity ?? 0)
+  let qty = rawSize / WAD
+  const sideRaw = p.side
+  const isShort = sideRaw === 1 || sideRaw === '1' || ['SELL', 'SHORT'].includes(String(sideRaw).toUpperCase())
+  if (qty >= 0 && isShort) qty = -Math.abs(qty)
+  const openPrice = Number(p.avg_entry_price ?? p.entry_price ?? p.open_price ?? 0) / WAD
+  // Prefer the market's live mark (already human); fall back to the position's
+  // own WAD mark_price if the market lookup failed.
+  const markPrice = Number(markFallback) || (Number(p.mark_price ?? p.markPrice ?? 0) / WAD) || 0
+  // uPnL: use the exchange's WAD value when present & sane, else derive it from
+  // mark vs entry so the panel never sits at a flat -0.00.
+  let uPnl = qty && openPrice && markPrice ? (markPrice - openPrice) * qty : 0
+  const rawUpnl = Number(p.unrealized_pnl ?? p.unrealised_pnl ?? p.uPnl ?? 0)
+  if (rawUpnl) { const scaled = rawUpnl / WAD; if (Number.isFinite(scaled)) uPnl = scaled }
   return {
-    market: p.market_name || p.market || p.config?.name || p.market_id,
+    market: p.market_name || nameFallback || p.market || p.config?.name || p.market_id,
     market_id: p.market_id,
-    size: signed,
+    size: qty,
     unrealisedPnl: uPnl,
     openPrice,
     markPrice,
-    leverage: Number(p.leverage ?? 0),
-    liquidationPrice: Number(p.liquidation_price ?? p.liq_price ?? 0),
-    marginBalance: Number(p.margin_balance ?? p.margin ?? 0),
+    leverage: Number(p.leverage ?? 0) / WAD,
+    liquidationPrice: Number(p.liquidation_price ?? p.liq_price ?? 0) / WAD,
+    marginBalance: Number(p.margin_balance ?? p.margin ?? 0) / WAD,
   }
 }
 
