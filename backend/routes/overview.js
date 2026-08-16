@@ -1,7 +1,9 @@
-// Aggregated overview across exchanges (only Extended live; others reserved).
+// Aggregated overview across exchanges (Extended + RISEx live; others reserved).
 const { Router } = require('express')
 const { dbQuery } = require('@surf-ai/sdk/db')
+const { getExchange } = require('../lib/exchanges')
 const extended = require('../lib/extended')
+const risex = require('../lib/risex')
 const { getActiveEnvironment, getCredentials } = require('../lib/store')
 
 const router = Router()
@@ -10,32 +12,36 @@ router.use(require('../lib/auth').requireAuth)
 const EXCHANGES = [
   { id: 'decibel', label: 'Decibel', live: false },
   { id: 'extended', label: 'Extended', live: true },
-  { id: 'risex', label: 'RISEx', live: false },
+  { id: 'risex', label: 'RISEx', live: true },
 ]
 
-async function exchangeCard(ex, environment) {
-  const base = { id: ex.id, label: ex.label, live: ex.live, environment }
-  if (!ex.live) {
+async function exchangeCard(exMeta, environment) {
+  const base = { id: exMeta.id, label: exMeta.label, live: exMeta.live, environment }
+  if (!exMeta.live) {
     return { ...base, implemented: false, status: 'reserved' }
   }
-  const cred = await getCredentials(ex.id, environment)
+  const ex = getExchange(exMeta.id)
+  const cred = await getCredentials(exMeta.id, environment)
+  const configured = ex.validateCred(cred).ok
   const { rows } = await dbQuery(
     `SELECT * FROM grid_configs WHERE exchange=$1 AND environment=$2 ORDER BY id LIMIT 1`,
-    [ex.id, environment]
+    [exMeta.id, environment]
   )
   const cfg = rows[0] || null
   const market = cfg?.market || 'BTC-USD'
   let stats = null, balance = null, position = null, lastPrice = null
   try {
-    stats = await extended.getMarketStats(environment, market)
+    stats = await ex.getMarketStats(environment, market)
     lastPrice = stats?.lastPrice
   } catch { /* ignore */ }
-  if (cred?.api_key) {
+  if (configured) {
     try {
-      balance = await extended.getBalance(environment, cred.api_key)
+      balance = exMeta.id === 'extended'
+        ? await extended.getBalance(environment, cred.api_key)
+        : await risex.getBalance(environment, cred)
     } catch { /* ignore */ }
     try {
-      const positions = await extended.getPositions(environment, cred.api_key)
+      const positions = await ex.getPositions(environment, cred)
       const list = Array.isArray(positions) ? positions : positions?.positions || []
       position = list.find((p) => p.market === market) || null
     } catch { /* ignore */ }
@@ -43,7 +49,7 @@ async function exchangeCard(ex, environment) {
   return {
     ...base,
     implemented: true,
-    configured: !!cred?.api_key,
+    configured,
     market,
     status: cfg?.status || 'stopped',
     grid: cfg

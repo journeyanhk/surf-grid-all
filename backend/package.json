@@ -7,6 +7,7 @@
   "dependencies": {
     "@scure/starknet": "^2.3.0",
     "@surf-ai/sdk": "1.0.5",
+    "ethers": "^6.17.0",
     "express": "4.22.1",
     "undici": "^8.10.0"
   }

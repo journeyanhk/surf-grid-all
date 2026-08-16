@@ -36,18 +36,24 @@ async function saveCredentials(exchange, environment, fields) {
     vault: fields.vault || existing?.vault || null,
     stark_private_key: fields.stark_private_key || existing?.stark_private_key || null,
     stark_public_key: fields.stark_public_key || existing?.stark_public_key || null,
+    account_address: fields.account_address || existing?.account_address || null,
+    signer_private_key: fields.signer_private_key || existing?.signer_private_key || null,
   }
   if (existing) {
     await dbQuery(
-      `UPDATE credentials SET api_key=$3, vault=$4, stark_private_key=$5, stark_public_key=$6, updated_at=now()
+      `UPDATE credentials SET api_key=$3, vault=$4, stark_private_key=$5, stark_public_key=$6,
+              account_address=$7, signer_private_key=$8, updated_at=now()
        WHERE exchange=$1 AND environment=$2`,
-      [exchange, environment, merged.api_key, merged.vault, merged.stark_private_key, merged.stark_public_key]
+      [exchange, environment, merged.api_key, merged.vault, merged.stark_private_key, merged.stark_public_key,
+       merged.account_address, merged.signer_private_key]
     )
   } else {
     await dbQuery(
-      `INSERT INTO credentials (exchange, environment, api_key, vault, stark_private_key, stark_public_key)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [exchange, environment, merged.api_key, merged.vault, merged.stark_private_key, merged.stark_public_key]
+      `INSERT INTO credentials (exchange, environment, api_key, vault, stark_private_key, stark_public_key,
+                               account_address, signer_private_key)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [exchange, environment, merged.api_key, merged.vault, merged.stark_private_key, merged.stark_public_key,
+       merged.account_address, merged.signer_private_key]
     )
   }
   return getCredentials(exchange, environment)

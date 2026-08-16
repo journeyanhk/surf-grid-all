@@ -1,6 +1,8 @@
 // Public market data + deterministic trend analysis.
 const { Router } = require('express')
 const extended = require('../lib/extended')
+const risex = require('../lib/risex')
+const { getExchange } = require('../lib/exchanges')
 const { getActiveEnvironment } = require('../lib/store')
 const { analyzeTrend, suggestGrid } = require('../lib/ai')
 
@@ -16,12 +18,17 @@ const INTERVAL_MAP = {
   '1d': 'P1D',
 }
 
+function marketProvider(exchange) {
+  return exchange === 'risex' ? risex : extended
+}
+
 // GET /api/market?market=BTC-USD -> stats
 router.get('/', async (req, res) => {
   try {
     const environment = req.query.environment || (await getActiveEnvironment())
     const market = req.query.market || 'BTC-USD'
-    const stats = await extended.getMarketStats(environment, market)
+    const ex = getExchange(req.query.exchange || 'extended')
+    const stats = await ex.getMarketStats(environment, market)
     res.json({ environment, market, stats })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -32,17 +39,21 @@ router.get('/', async (req, res) => {
 router.get('/markets', async (req, res) => {
   try {
     const environment = req.query.environment || (await getActiveEnvironment())
-    const markets = await extended.getMarkets(environment)
-    const list = (Array.isArray(markets) ? markets : []).map((m) => ({
-      name: m.name,
-      assetName: m.assetName,
-      lastPrice: m.marketStats?.lastPrice,
-      change: m.marketStats?.dailyPriceChangePercentage,
-      active: m.active,
-      maxLeverage: m.tradingConfig?.maxLeverage,
-      minOrderSize: m.tradingConfig?.minOrderSize,
-      minPriceChange: m.tradingConfig?.minPriceChange,
-    }))
+    const provider = marketProvider(req.query.exchange || 'extended')
+    const markets = await provider.getMarkets(environment)
+    // RISEx already returns the normalized shape; Extended returns raw rows.
+    const list = (req.query.exchange === 'risex')
+      ? markets
+      : (Array.isArray(markets) ? markets : []).map((m) => ({
+          name: m.name,
+          assetName: m.assetName,
+          lastPrice: m.marketStats?.lastPrice,
+          change: m.marketStats?.dailyPriceChangePercentage,
+          active: m.active,
+          maxLeverage: m.tradingConfig?.maxLeverage,
+          minOrderSize: m.tradingConfig?.minOrderSize,
+          minPriceChange: m.tradingConfig?.minPriceChange,
+        }))
     res.json({ environment, markets: list })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -56,7 +67,8 @@ router.get('/candles', async (req, res) => {
     const market = req.query.market || 'BTC-USD'
     const interval = INTERVAL_MAP[req.query.interval] || 'PT1H'
     const limit = Number(req.query.limit) || 200
-    const candles = await extended.getCandles(environment, market, interval, limit)
+    const ex = getExchange(req.query.exchange || 'extended')
+    const candles = await ex.getCandles(environment, market, interval, limit)
     res.json({ market, interval, candles })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -69,7 +81,8 @@ router.get('/trend', async (req, res) => {
     const environment = req.query.environment || (await getActiveEnvironment())
     const market = req.query.market || 'BTC-USD'
     const interval = INTERVAL_MAP[req.query.interval] || 'PT1H'
-    const candles = await extended.getCandles(environment, market, interval, 120)
+    const ex = getExchange(req.query.exchange || 'extended')
+    const candles = await ex.getCandles(environment, market, interval, 120)
     const trend = analyzeTrend(candles)
     const suggestion = suggestGrid(candles, trend)
     res.json({ market, interval, trend, suggestion })

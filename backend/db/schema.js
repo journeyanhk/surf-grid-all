@@ -20,6 +20,8 @@ exports.credentials = pgTable('credentials', {
   vault: text('vault'),
   stark_private_key: text('stark_private_key'),
   stark_public_key: text('stark_public_key'),
+  account_address: text('account_address'), // RISEx: RISE_ACCOUNT_ADDRESS
+  signer_private_key: text('signer_private_key'), // RISEx: RISE_SIGNER_PRIVATE_KEY (session key)
   updated_at: timestamp('updated_at').defaultNow(),
 })
 

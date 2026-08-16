@@ -44,7 +44,10 @@ function useGridTicker(enabled: boolean) {
   useEffect(() => {
     if (!enabled) return
     const tick = () => postJSON('grid/tick').catch(() => {})
-    const reconcile = () => getJSON('grid/ledger?exchange=extended').catch(() => {})
+    const reconcile = () => {
+      getJSON('grid/ledger?exchange=extended').catch(() => {})
+      getJSON('grid/ledger?exchange=risex').catch(() => {})
+    }
     tick()
     reconcile()
     const tickId = window.setInterval(tick, 20000)
@@ -80,7 +83,7 @@ export default function App() {
           <div className="flex items-center gap-2 text-[11px]">
             <span className="px-2 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400">DE: <span className="text-slate-500">预留</span></span>
             <span className="px-2 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400">EX: <span className="text-emerald-400">LIVE</span></span>
-            <span className="px-2 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400">RS: <span className="text-slate-500">预留</span></span>
+            <span className="px-2 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400">RS: <span className="text-emerald-400">LIVE</span></span>
           </div>
           <div className="ml-auto flex items-center gap-3">
             {/* Environment switcher */}
@@ -119,9 +122,9 @@ export default function App() {
 
       <main className="max-w-[1600px] mx-auto px-6 py-6">
         {tab === 'overview' && <Overview environment={environment} onGo={overviewCard} />}
-        {tab === 'extended' && <ExtendedPanel environment={environment} />}
+        {tab === 'extended' && <ExtendedPanel environment={environment} exchange="extended" label="Extended" />}
         {tab === 'decibel' && <Reserved name="Decibel" />}
-        {tab === 'risex' && <Reserved name="RISEx" />}
+        {tab === 'risex' && <ExtendedPanel environment={environment} exchange="risex" label="RISEx" />}
         {tab === 'ai' && <AiAssistant environment={environment} />}
         {tab === 'config' && <ConfigPanel environment={environment} />}
       </main>

@@ -8,6 +8,7 @@ const {
   saveCredentials,
 } = require('../lib/store')
 const extended = require('../lib/extended')
+const risex = require('../lib/risex')
 const stark = require('../lib/stark')
 
 const router = Router()
@@ -27,6 +28,7 @@ router.get('/', async (req, res) => {
     const directMode = (await getSetting('direct_mode', false)) || false
     const proxyUrl = (await getSetting('proxy_url', '')) || ''
     const out = {}
+    const risexOut = {}
     for (const env of ['testnet', 'mainnet']) {
       const c = await getCredentials('extended', env)
       out[env] = {
@@ -37,8 +39,15 @@ router.get('/', async (req, res) => {
         api_key_masked: mask(c?.api_key),
         stark_private_masked: mask(c?.stark_private_key),
       }
+      const r = await getCredentials('risex', env)
+      risexOut[env] = {
+        has_account: !!r?.account_address,
+        has_signer: !!r?.signer_private_key,
+        account_address: r?.account_address || '',
+        signer_private_masked: mask(r?.signer_private_key),
+      }
     }
-    res.json({ environment, direct_mode: directMode, proxy_url: proxyUrl, extended: out })
+    res.json({ environment, direct_mode: directMode, proxy_url: proxyUrl, extended: out, risex: risexOut })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
@@ -143,6 +152,48 @@ router.post('/test', async (req, res) => {
     const cred = await getCredentials('extended', environment)
     if (!cred?.api_key) return res.json({ ok: false, error: '未配置 API Key' })
     const balance = await extended.getBalance(environment, cred.api_key)
+    res.json({ ok: true, environment, balance })
+  } catch (e) {
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// POST /api/settings/credentials/risex { environment, account_address, signer_private_key }
+router.post('/credentials/risex', async (req, res) => {
+  try {
+    const { environment, account_address, signer_private_key } = req.body || {}
+    if (!['testnet', 'mainnet'].includes(environment)) {
+      return res.status(400).json({ error: 'environment must be testnet|mainnet' })
+    }
+    if (account_address && !/^0x[0-9a-fA-F]{40}$/.test(String(account_address).trim())) {
+      return res.status(400).json({ error: 'RISE 账户地址格式无效（应为 0x + 40 位十六进制）' })
+    }
+    if (signer_private_key && !/^0x?[0-9a-fA-F]{64}$/.test(String(signer_private_key).trim().replace(/^0x/, '0x'))) {
+      // allow with or without 0x prefix, 64 hex chars
+      const clean = String(signer_private_key).trim().replace(/^0x/, '')
+      if (!/^[0-9a-fA-F]{64}$/.test(clean)) {
+        return res.status(400).json({ error: 'RISE 签名私钥格式无效（应为 64 位十六进制）' })
+      }
+    }
+    const saved = await saveCredentials('risex', environment, {
+      account_address: account_address ? String(account_address).trim() : undefined,
+      signer_private_key: signer_private_key ? String(signer_private_key).trim() : undefined,
+    })
+    res.json({ ok: true, account_address: saved.account_address })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// POST /api/settings/test/risex { environment }
+router.post('/test/risex', async (req, res) => {
+  try {
+    const environment = req.body?.environment || (await getActiveEnvironment())
+    const cred = await getCredentials('risex', environment)
+    if (!cred?.account_address || !cred?.signer_private_key) {
+      return res.json({ ok: false, error: '未配置 RISE 账户地址 / 签名私钥' })
+    }
+    const balance = await risex.getBalance(environment, cred)
     res.json({ ok: true, environment, balance })
   } catch (e) {
     res.json({ ok: false, error: e.message })

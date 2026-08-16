@@ -68,7 +68,7 @@ function computeLive(form: any, atr1h: number, atr4h: number, price: number, max
   }
 }
 
-export default function ExtendedPanel({ environment }: { environment: string }) {
+export default function ExtendedPanel({ environment, exchange = 'extended', label = 'Extended' }: { environment: string; exchange?: string; label?: string }) {
   const qc = useQueryClient()
   const [interval, setInterval] = useState('1h')
   const [msg, setMsg] = useState<{ t: 'ok' | 'err'; m: string } | null>(null)
@@ -77,66 +77,66 @@ export default function ExtendedPanel({ environment }: { environment: string }) 
   const market = form?.market || 'BTC-USD'
 
   const cfgQ = useQuery({
-    queryKey: ['grid', 'extended', environment],
-    queryFn: () => getJSON(`grid?exchange=extended&environment=${environment}`),
+    queryKey: ['grid', exchange, environment],
+    queryFn: () => getJSON(`grid?exchange=${exchange}&environment=${environment}`),
     refetchInterval: 30000,
     refetchIntervalInBackground: true,
   })
   const marketsQ = useQuery({
-    queryKey: ['markets', environment],
-    queryFn: () => getJSON(`market/markets?environment=${environment}`),
+    queryKey: ['markets', exchange, environment],
+    queryFn: () => getJSON(`market/markets?exchange=${exchange}&environment=${environment}`),
   })
   const trendQ = useQuery({
-    queryKey: ['trend', environment, market, interval],
-    queryFn: () => getJSON(`market/trend?environment=${environment}&market=${market}&interval=${interval}`),
+    queryKey: ['trend', exchange, environment, market, interval],
+    queryFn: () => getJSON(`market/trend?exchange=${exchange}&environment=${environment}&market=${market}&interval=${interval}`),
     refetchInterval: 30000,
     refetchIntervalInBackground: true,
   })
   const statsQ = useQuery({
-    queryKey: ['market', environment, market],
-    queryFn: () => getJSON(`market?environment=${environment}&market=${market}`),
+    queryKey: ['market', exchange, environment, market],
+    queryFn: () => getJSON(`market?exchange=${exchange}&environment=${environment}&market=${market}`),
     refetchInterval: 10000,
     refetchIntervalInBackground: true,
   })
   const candlesQ = useQuery({
-    queryKey: ['candles', environment, market, interval],
-    queryFn: () => getJSON(`market/candles?environment=${environment}&market=${market}&interval=${interval}&limit=120`),
+    queryKey: ['candles', exchange, environment, market, interval],
+    queryFn: () => getJSON(`market/candles?exchange=${exchange}&environment=${environment}&market=${market}&interval=${interval}&limit=120`),
     refetchInterval: 30000,
     refetchIntervalInBackground: true,
   })
   const accountQ = useQuery({
-    queryKey: ['account', environment, market],
-    queryFn: () => getJSON(`account?environment=${environment}&market=${market}`),
+    queryKey: ['account', exchange, environment, market],
+    queryFn: () => getJSON(`account?exchange=${exchange}&environment=${environment}&market=${market}`),
     refetchInterval: 10000,
     refetchIntervalInBackground: true,
   })
   const previewQ = useQuery({
-    queryKey: ['grid-preview', environment, market],
-    queryFn: () => getJSON(`grid/preview?exchange=extended&environment=${environment}`),
+    queryKey: ['grid-preview', exchange, environment, market],
+    queryFn: () => getJSON(`grid/preview?exchange=${exchange}&environment=${environment}`),
     refetchInterval: 20000,
     refetchIntervalInBackground: true,
   })
   const tradesQ = useQuery({
-    queryKey: ['grid-trades', environment],
-    queryFn: () => getJSON(`grid/trades?exchange=extended&environment=${environment}`),
+    queryKey: ['grid-trades', exchange, environment],
+    queryFn: () => getJSON(`grid/trades?exchange=${exchange}&environment=${environment}`),
     refetchInterval: 15000,
     refetchIntervalInBackground: true,
   })
   const logsQ = useQuery({
-    queryKey: ['grid-logs', environment],
-    queryFn: () => getJSON(`grid/logs?exchange=extended&environment=${environment}`),
+    queryKey: ['grid-logs', exchange, environment],
+    queryFn: () => getJSON(`grid/logs?exchange=${exchange}&environment=${environment}`),
     refetchInterval: 15000,
     refetchIntervalInBackground: true,
   })
   const ledgerQ = useQuery({
-    queryKey: ['grid-ledger', environment],
-    queryFn: () => getJSON(`grid/ledger?exchange=extended&environment=${environment}`),
+    queryKey: ['grid-ledger', exchange, environment],
+    queryFn: () => getJSON(`grid/ledger?exchange=${exchange}&environment=${environment}`),
     refetchInterval: 60000,
     refetchIntervalInBackground: true,
   })
   const regionQ = useQuery({
-    queryKey: ['region-check', environment],
-    queryFn: () => getJSON(`grid/region-check?environment=${environment}`),
+    queryKey: ['region-check', exchange, environment],
+    queryFn: () => getJSON(`grid/region-check?exchange=${exchange}&environment=${environment}`),
     staleTime: 300000,
   })
   const regionBlocked = regionQ.data?.blocked === true
@@ -179,11 +179,11 @@ export default function ExtendedPanel({ environment }: { environment: string }) 
   }
 
   const saveMut = useMutation({
-    mutationFn: (patch: any) => putJSON('grid', { exchange: 'extended', environment, ...patch }),
+    mutationFn: (patch: any) => putJSON('grid', { exchange, environment, ...patch }),
     onSuccess: (d) => {
       setForm({ ...d.config })
-      qc.invalidateQueries({ queryKey: ['grid', 'extended', environment] })
-      qc.invalidateQueries({ queryKey: ['grid-preview', environment] })
+      qc.invalidateQueries({ queryKey: ['grid', exchange, environment] })
+      qc.invalidateQueries({ queryKey: ['grid-preview', exchange] })
     },
   })
 
@@ -211,7 +211,7 @@ export default function ExtendedPanel({ environment }: { environment: string }) 
   const startMut = useMutation({
     mutationFn: async () => {
       await persist()
-      return postJSON('grid/start', { exchange: 'extended', environment })
+      return postJSON('grid/start', { exchange, environment })
     },
     onSuccess: (d) => {
       setMsg({ t: 'ok', m: `已启动动态网格：中心 ${fmt(d.macroCenter)}，格距 ${fmt(d.spacing)}，挂出 ${d.placed} 单${d.errors?.length ? `，${d.errors.length} 单失败` : ''}` })
@@ -220,7 +220,7 @@ export default function ExtendedPanel({ environment }: { environment: string }) 
     onError: (e: Error) => setMsg({ t: 'err', m: e.message }),
   })
   const stopMut = useMutation({
-    mutationFn: () => postJSON('grid/stop', { exchange: 'extended', environment, closePosition: true }),
+    mutationFn: () => postJSON('grid/stop', { exchange, environment, closePosition: true }),
     onSuccess: (d: any) => {
       const c = d?.cancel
       const cl = d?.close
@@ -238,7 +238,7 @@ export default function ExtendedPanel({ environment }: { environment: string }) 
     onError: (e: Error) => setMsg({ t: 'err', m: e.message }),
   })
   const cancelMut = useMutation({
-    mutationFn: () => postJSON('grid/cancel-orders', { exchange: 'extended', environment }),
+    mutationFn: () => postJSON('grid/cancel-orders', { exchange, environment }),
     onSuccess: (d: any) => {
       const c = d?.cancel
       let m = '已撤销所有挂单（保留持仓）'
@@ -249,17 +249,17 @@ export default function ExtendedPanel({ environment }: { environment: string }) 
     onError: (e: Error) => setMsg({ t: 'err', m: e.message }),
   })
   const resetMut = useMutation({
-    mutationFn: () => postJSON('grid/reset-stats', { exchange: 'extended', environment }),
+    mutationFn: () => postJSON('grid/reset-stats', { exchange, environment }),
     onSuccess: () => { setMsg({ t: 'ok', m: '统计已重置' }); refetchAll() },
   })
 
   function refetchAll() {
-    qc.invalidateQueries({ queryKey: ['grid', 'extended', environment] })
-    qc.invalidateQueries({ queryKey: ['grid-preview', environment] })
-    qc.invalidateQueries({ queryKey: ['account', environment] })
-    qc.invalidateQueries({ queryKey: ['grid-trades', environment] })
-    qc.invalidateQueries({ queryKey: ['grid-logs', environment] })
-    qc.invalidateQueries({ queryKey: ['grid-ledger', environment] })
+    qc.invalidateQueries({ queryKey: ['grid', exchange, environment] })
+    qc.invalidateQueries({ queryKey: ['grid-preview', exchange] })
+    qc.invalidateQueries({ queryKey: ['account', exchange] })
+    qc.invalidateQueries({ queryKey: ['grid-trades', exchange] })
+    qc.invalidateQueries({ queryKey: ['grid-logs', exchange] })
+    qc.invalidateQueries({ queryKey: ['grid-ledger', exchange] })
   }
 
   function applyRecommendation() {
@@ -366,7 +366,7 @@ export default function ExtendedPanel({ environment }: { environment: string }) 
     <div className="grid grid-cols-1 xl:grid-cols-[380px_1fr] gap-5">
       {regionBlocked && (
         <div className="xl:col-span-2 rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3">
-          <div className="text-[13px] text-rose-300 font-medium">⚠️ 该地区无法在 Extended 主网下单（HTTP 451 法律合规限制）</div>
+          <div className="text-[13px] text-rose-300 font-medium">⚠️ 该地区无法在 {label} 主网下单（HTTP 451 法律合规限制）</div>
           <div className="text-[12px] text-rose-200/70 mt-1 leading-relaxed">
             当前部署服务器所在区域被交易所限制下单，主网启动会全部失败。行情、账户、撤单/平仓仍可用；如需实盘交易，请切换到测试网，或从允许的地区/网络出口部署。
           </div>
@@ -496,7 +496,7 @@ export default function ExtendedPanel({ environment }: { environment: string }) 
 
           <div className="space-y-2.5 mt-4">
             <Btn variant="success" className="w-full" disabled={running || startMut.isPending || regionBlocked} onClick={() => startMut.mutate()}>
-              {startMut.isPending ? '启动中…' : regionBlocked ? '该地区禁止主网下单（451）' : running ? '网格运行中' : '启动 Extended 动态网格'}
+              {startMut.isPending ? '启动中…' : regionBlocked ? '该地区禁止主网下单（451）' : running ? '网格运行中' : `启动 ${label} 动态网格`}
             </Btn>
             <Btn variant="danger" className="w-full" disabled={stopMut.isPending} onClick={() => stopMut.mutate()}>停止 + 撤单 + 平仓</Btn>
             <Btn className="w-full" disabled={saveMut.isPending} onClick={() => persist().then(() => setMsg({ t: 'ok', m: '参数已保存（未停止网格）' }))}>保存参数（不停止网格）</Btn>

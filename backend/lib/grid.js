@@ -10,7 +10,7 @@
 //   - enforces soft/hard inventory caps and stop-losses;
 //   - only recenters the macro grid when inventory is near flat.
 const { dbQuery } = require('@surf-ai/sdk/db')
-const extended = require('./extended')
+const { getExchange } = require('./exchanges')
 const { analyzeTrend } = require('./ai')
 const { getCredentials, log } = require('./store')
 
@@ -68,16 +68,16 @@ async function getConfig(id) {
   return rows[0] || null
 }
 
-async function currentPrice(environment, market) {
+async function currentPrice(ex, environment, market) {
   // Prefer the live orderbook mid — `lastPrice` can lag the book badly on thin
   // markets, which puts our post-only rungs on the wrong side of the spread.
   try {
-    const { mid } = await extended.getBestBidAsk(environment, market)
+    const { mid } = await ex.getBestBidAsk(environment, market)
     if (mid > 0) return mid
   } catch {
     /* fall back to stats */
   }
-  const stats = await extended.getMarketStats(environment, market)
+  const stats = await ex.getMarketStats(environment, market)
   return num(stats?.markPrice || stats?.lastPrice)
 }
 
@@ -96,11 +96,15 @@ function positionSize(pos) {
 }
 
 // Read the live position for a market from the DEX (authoritative inventory).
-async function getNetPosition(environment, apiKey, market) {
+async function getNetPosition(ex, environment, cred, market) {
   try {
-    const raw = await extended.getPositions(environment, apiKey)
+    const raw = await ex.getPositions(environment, cred)
     const list = Array.isArray(raw) ? raw : raw?.positions || []
-    const pos = list.find((p) => (p.market || p.symbol || p.name) === market)
+    const base = String(market).split(/[-/]/)[0].toUpperCase()
+    const pos =
+      list.find((p) => (p.market || p.symbol || p.name) === market) ||
+      list.find((p) => String(p.market || p.symbol || p.name || '').toUpperCase().startsWith(base)) ||
+      (list.length === 1 ? list[0] : null)
     return {
       size: positionSize(pos),
       unrealized: num(pos?.unrealisedPnl ?? pos?.unrealizedPnl),
@@ -112,9 +116,9 @@ async function getNetPosition(environment, apiKey, market) {
 }
 
 // ATR in dollars for a given interval (reuses the deterministic analyzer).
-async function atrDollars(environment, market, interval, price) {
+async function atrDollars(ex, environment, market, interval, price) {
   try {
-    const candles = await extended.getCandles(environment, market, interval, 60)
+    const candles = await ex.getCandles(environment, market, interval, 60)
     const info = analyzeTrend(candles)
     const p = price || info.lastPrice || 0
     return { atr: (info.atrPct / 100) * p, atrPct: info.atrPct }
@@ -226,9 +230,10 @@ function desiredLevels(cfg, params, macroCenter, spacing, price, netQ) {
 // order hash we submitted — a string that never suffers the big-int precision
 // loss that JSON-parsed numeric ids do); falls back to the numeric id.
 async function cancelTracked(cfg, cred, t) {
+  const ex = getExchange(cfg.exchange)
   const attempts = []
-  if (t.external_id) attempts.push(() => extended.cancelByExternalId(cfg.environment, cred, t.external_id))
-  if (t.exchange_order_id) attempts.push(() => extended.cancelOrder(cfg.environment, cred, t.exchange_order_id))
+  if (t.external_id) attempts.push(() => ex.cancelByExternalId(cfg.environment, cred, t.external_id))
+  if (t.exchange_order_id) attempts.push(() => ex.cancelOrder(cfg.environment, cred, t.exchange_order_id))
   for (const run of attempts) {
     try {
       await run()
@@ -245,16 +250,17 @@ async function cancelTracked(cfg, cred, t) {
 // massCancel occasionally races with in-flight placements, so we re-check and
 // mop up any survivors by externalId before giving up.
 async function ensureAllCancelled(cfg, cred) {
+  const ex = getExchange(cfg.exchange)
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      await extended.massCancel(cfg.environment, cred, cfg.market)
+      await ex.massCancel(cfg.environment, cred, cfg.market)
     } catch {
       /* ignore, verify below */
     }
     await sleep(400)
     let list = []
     try {
-      const raw = await extended.getOpenOrders(cfg.environment, cred.api_key, cfg.market)
+      const raw = await ex.getOpenOrders(cfg.environment, cred, cfg.market)
       list = Array.isArray(raw) ? raw : raw?.orders || []
     } catch {
       continue
@@ -262,8 +268,8 @@ async function ensureAllCancelled(cfg, cred) {
     if (!list.length) return { ok: true, remaining: 0 }
     for (const o of list) {
       try {
-        if (o.externalId) await extended.cancelByExternalId(cfg.environment, cred, o.externalId)
-        else if (o.id != null) await extended.cancelOrder(cfg.environment, cred, o.id)
+        if (o.externalId) await ex.cancelByExternalId(cfg.environment, cred, o.externalId)
+        else if (o.id != null) await ex.cancelOrder(cfg.environment, cred, o.id)
       } catch {
         /* next */
       }
@@ -272,7 +278,7 @@ async function ensureAllCancelled(cfg, cred) {
   }
   let remaining = 0
   try {
-    const raw = await extended.getOpenOrders(cfg.environment, cred.api_key, cfg.market)
+    const raw = await ex.getOpenOrders(cfg.environment, cred, cfg.market)
     remaining = (Array.isArray(raw) ? raw : raw?.orders || []).length
   } catch {
     /* ignore */
@@ -283,11 +289,12 @@ async function ensureAllCancelled(cfg, cred) {
 // Reconcile the live book toward the desired window. Cancels tracked orders no
 // longer wanted, places missing ones. Returns { placed, cancelled, errors }.
 async function syncOrders(cfg, cred, params, runtime, price, netQ, { placeLimit = 8 } = {}) {
+  const ex = getExchange(cfg.exchange)
   const { levels } = desiredLevels(cfg, params, runtime.macroCenter, runtime.spacing, price, netQ)
   const qty = params.q
 
   // Live open orders on the DEX.
-  const openRaw = await extended.getOpenOrders(cfg.environment, cred.api_key, cfg.market)
+  const openRaw = await ex.getOpenOrders(cfg.environment, cred, cfg.market)
   const openList = Array.isArray(openRaw) ? openRaw : openRaw?.orders || []
   const liveIds = new Set()
   for (const o of openList) for (const f of [o.id, o.externalId, o.orderId]) if (f != null) liveIds.add(String(f))
@@ -325,7 +332,7 @@ async function syncOrders(cfg, cred, params, runtime, price, netQ, { placeLimit 
   let bestBid = 0
   let bestAsk = 0
   try {
-    ;({ bestBid, bestAsk } = await extended.getBestBidAsk(cfg.environment, cfg.market))
+    ;({ bestBid, bestAsk } = await ex.getBestBidAsk(cfg.environment, cfg.market))
   } catch {
     /* no book — fall back to unguarded placement */
   }
@@ -344,7 +351,7 @@ async function syncOrders(cfg, cred, params, runtime, price, netQ, { placeLimit 
       continue
     }
     try {
-      const res = await extended.placeLimitOrder(cfg.environment, cred, {
+      const res = await ex.placeLimitOrder(cfg.environment, cred, {
         market: cfg.market,
         side: l.side,
         qty,
@@ -370,15 +377,17 @@ async function startGridInner(configId) {
   const cfg = await getConfig(configId)
   if (!cfg) throw new Error('grid config not found')
   const cred = await getCredentials(cfg.exchange, cfg.environment)
-  if (!cred?.api_key || !cred?.stark_private_key || !cred?.vault) {
-    throw new Error('缺少 API 凭证，请先在设置中配置 API Key / Vault / Stark Key')
+  const ex = getExchange(cfg.exchange)
+  const credCheck = ex.validateCred(cred)
+  if (!credCheck.ok) {
+    throw new Error(credCheck.error || '缺少 API 凭证，请先在设置中配置')
   }
-  const price = await currentPrice(cfg.environment, cfg.market)
+  const price = await currentPrice(ex, cfg.environment, cfg.market)
   if (!price) throw new Error('无法获取当前价格')
 
   const [{ atr: atr1h }, { atr: atr4h }] = await Promise.all([
-    atrDollars(cfg.environment, cfg.market, 'PT1H', price),
-    atrDollars(cfg.environment, cfg.market, 'PT4H', price),
+    atrDollars(ex, cfg.environment, cfg.market, 'PT1H', price),
+    atrDollars(ex, cfg.environment, cfg.market, 'PT4H', price),
   ])
   const params = computeDynamicParams(cfg, price, atr1h, atr4h)
 
@@ -398,13 +407,13 @@ async function startGridInner(configId) {
 
   // Clear any stale tracked orders and (best-effort) cancel leftovers on the DEX.
   try {
-    await extended.massCancel(cfg.environment, cred, cfg.market)
+    await ex.massCancel(cfg.environment, cred, cfg.market)
   } catch {
     /* ignore */
   }
   await dbQuery(`DELETE FROM grid_orders WHERE config_id = $1`, [configId])
 
-  const net = await getNetPosition(cfg.environment, cred.api_key, cfg.market)
+  const net = await getNetPosition(ex, cfg.environment, cred, cfg.market)
   const sync = await syncOrders(cfg, cred, params, runtime, price, net.size, {
     placeLimit: params.activePerSide * 2,
   })
@@ -474,12 +483,13 @@ async function stopGrid(configId, { closePosition = true } = {}) {
   const cfg = await getConfig(configId)
   if (!cfg) throw new Error('grid config not found')
   const cred = await getCredentials(cfg.exchange, cfg.environment)
+  const ex = getExchange(cfg.exchange)
   await acquire(configId, { wait: true }) // block any in-flight tick first
   const result = { ok: true, cancel: null, close: null }
   try {
     // Mark stopped up front so a late tick can't re-arm after we clear the book.
     await dbQuery(`UPDATE grid_configs SET status='stopped', updated_at=now() WHERE id=$1`, [configId])
-    if (cred?.api_key) {
+    if (ex.validateCred(cred).ok) {
       try {
         const cancel = await ensureAllCancelled(cfg, cred)
         result.cancel = { ok: cancel.ok, method: 'verified', remaining: cancel.remaining }
@@ -491,12 +501,12 @@ async function stopGrid(configId, { closePosition = true } = {}) {
       }
       if (closePosition) {
         try {
-          const net = await getNetPosition(cfg.environment, cred.api_key, cfg.market)
+          const net = await getNetPosition(ex, cfg.environment, cred, cfg.market)
           if (net.size !== 0) {
-            const price = await currentPrice(cfg.environment, cfg.market)
+            const price = await currentPrice(ex, cfg.environment, cfg.market)
             const side = net.size > 0 ? 'SELL' : 'BUY'
             const px = side === 'SELL' ? price * 0.99 : price * 1.01
-            const res = await extended.placeLimitOrder(cfg.environment, cred, {
+            const res = await ex.placeLimitOrder(cfg.environment, cred, {
               market: cfg.market, side, qty: Math.abs(net.size), price: px, reduceOnly: true, timeInForce: 'GTT',
             })
             result.close = { ok: true, side, qty: Math.abs(net.size) }
@@ -523,10 +533,11 @@ async function cancelAllKeepPosition(configId) {
   const cfg = await getConfig(configId)
   if (!cfg) throw new Error('grid config not found')
   const cred = await getCredentials(cfg.exchange, cfg.environment)
+  const ex = getExchange(cfg.exchange)
   await acquire(configId, { wait: true })
   let cancel = null
   try {
-    if (cred?.api_key) {
+    if (ex.validateCred(cred).ok) {
       try {
         cancel = await ensureAllCancelled(cfg, cred)
         await log(configId, cfg.exchange, cancel.ok ? 'info' : 'warn',
@@ -549,11 +560,12 @@ async function reconcileOrders(configId) {
   const cfg = await getConfig(configId)
   if (!cfg) return { configured: false }
   const cred = await getCredentials(cfg.exchange, cfg.environment)
-  if (!cred?.api_key) return { configured: false }
+  const ex = getExchange(cfg.exchange)
+  if (!ex.validateCred(cred).ok) return { configured: false }
 
   let dexList = []
   try {
-    const raw = await extended.getOpenOrders(cfg.environment, cred.api_key, cfg.market)
+    const raw = await ex.getOpenOrders(cfg.environment, cred, cfg.market)
     dexList = Array.isArray(raw) ? raw : raw?.orders || []
   } catch (e) {
     return { configured: true, error: e.message }
@@ -676,10 +688,11 @@ async function reconcileOrders(configId) {
 async function computePreview(configId) {
   const cfg = await getConfig(configId)
   if (!cfg) return { ok: false }
-  const price = await currentPrice(cfg.environment, cfg.market)
+  const ex = getExchange(cfg.exchange)
+  const price = await currentPrice(ex, cfg.environment, cfg.market)
   const [{ atr: atr1h, atrPct: atr1hPct }, { atr: atr4h }] = await Promise.all([
-    atrDollars(cfg.environment, cfg.market, 'PT1H', price),
-    atrDollars(cfg.environment, cfg.market, 'PT4H', price),
+    atrDollars(ex, cfg.environment, cfg.market, 'PT1H', price),
+    atrDollars(ex, cfg.environment, cfg.market, 'PT4H', price),
   ])
   const params = computeDynamicParams(cfg, price, atr1h, atr4h)
   const lev = Math.max(1, num(cfg.leverage, 30))
@@ -727,16 +740,17 @@ async function tickInner(configId) {
   const cfg = await getConfig(configId)
   if (!cfg || cfg.status !== 'running') return { skipped: true }
   const cred = await getCredentials(cfg.exchange, cfg.environment)
-  if (!cred?.api_key) return { skipped: true }
+  const ex = getExchange(cfg.exchange)
+  if (!ex.validateCred(cred).ok) return { skipped: true }
 
   const runtime = getRuntime(cfg)
   if (!runtime.spacing || !runtime.macroCenter) return { skipped: true, reason: 'no-runtime' }
 
-  const price = await currentPrice(cfg.environment, cfg.market)
+  const price = await currentPrice(ex, cfg.environment, cfg.market)
   if (!price) return { skipped: true, reason: 'no-price' }
 
   // --- Fill detection (tracked open orders that vanished from the DEX) ---
-  const openRaw = await extended.getOpenOrders(cfg.environment, cred.api_key, cfg.market)
+  const openRaw = await ex.getOpenOrders(cfg.environment, cred, cfg.market)
   const openList = Array.isArray(openRaw) ? openRaw : openRaw?.orders || []
   const liveIds = new Set()
   for (const o of openList) for (const f of [o.id, o.externalId, o.orderId, o.clientOrderId]) if (f != null) liveIds.add(String(f))
@@ -770,7 +784,7 @@ async function tickInner(configId) {
   const filledExt = new Set()
   if (candidates.length) {
     try {
-      const trRaw = await extended.getTradesHistory(cfg.environment, cred.api_key, cfg.market)
+      const trRaw = await ex.getTradesHistory(cfg.environment, cred, cfg.market)
       const trList = Array.isArray(trRaw) ? trRaw : trRaw?.trades || []
       for (const tr of trList) {
         if (tr.externalOrderId) filledExt.add(String(tr.externalOrderId))
@@ -819,7 +833,7 @@ async function tickInner(configId) {
   }
 
   // --- Inventory + risk ---
-  const net = await getNetPosition(cfg.environment, cred.api_key, cfg.market)
+  const net = await getNetPosition(ex, cfg.environment, cred, cfg.market)
   const cfg2 = await getConfig(configId) // refresh realized after fills
   const realized = num(cfg2.realized_pnl)
 
@@ -853,7 +867,7 @@ async function tickInner(configId) {
       try {
         const side = net.size > 0 ? 'SELL' : 'BUY'
         const px = side === 'SELL' ? price * 0.99 : price * 1.01
-        await extended.placeLimitOrder(cfg.environment, cred, {
+        await ex.placeLimitOrder(cfg.environment, cred, {
           market: cfg.market, side, qty: Math.abs(net.size), price: px, reduceOnly: true, timeInForce: 'GTT',
         })
       } catch (e) {
@@ -873,7 +887,7 @@ async function tickInner(configId) {
       const side = net.size > 0 ? 'SELL' : 'BUY'
       const half = Math.abs(net.size) / 2
       const px = side === 'SELL' ? price * 0.99 : price * 1.01
-      await extended.placeLimitOrder(cfg.environment, cred, {
+      await ex.placeLimitOrder(cfg.environment, cred, {
         market: cfg.market, side, qty: half, price: px, reduceOnly: true, timeInForce: 'GTT',
       })
       runtime.lastSlReduceAt = now
@@ -886,8 +900,8 @@ async function tickInner(configId) {
 
   // --- Macro recenter (only when inventory is near flat) ---
   const [{ atr: atr1h, atrPct: atr1hPct }, { atr: atr4h }] = await Promise.all([
-    atrDollars(cfg.environment, cfg.market, 'PT1H', price),
-    atrDollars(cfg.environment, cfg.market, 'PT4H', price),
+    atrDollars(ex, cfg.environment, cfg.market, 'PT1H', price),
+    atrDollars(ex, cfg.environment, cfg.market, 'PT4H', price),
   ])
   const params = computeDynamicParams(cfg, price, atr1h, atr4h)
   const macroThreshold = Math.max(price * 0.0125, 10 * spacing)

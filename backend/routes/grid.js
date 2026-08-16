@@ -160,7 +160,8 @@ router.get('/preview', async (req, res) => {
 router.get('/region-check', async (req, res) => {
   try {
     const environment = req.query.environment || (await getActiveEnvironment())
-    const r = await require('../lib/extended').checkOrderRegion(environment)
+    const ex = require('../lib/exchanges').getExchange(req.query.exchange || 'extended')
+    const r = await ex.checkOrderRegion(environment)
     res.json({ environment, ...r })
   } catch (e) {
     res.status(500).json({ error: e.message })
