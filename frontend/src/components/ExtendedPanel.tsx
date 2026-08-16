@@ -157,7 +157,18 @@ export default function ExtendedPanel({ environment, exchange = 'extended', labe
   const realized = num(cfg?.realized_pnl)
   const position = account?.position
   const posSize = num(position?.size)
-  const unrealized = num(position?.unrealisedPnl ?? position?.unrealizedPnl)
+  const posEntry = num(position?.openPrice)
+  const posMark = num(position?.markPrice) || lastPrice
+  // Prefer the exchange-reported uPnL; when it's absent/zero (RISEx testnet often
+  // omits it) derive it live from mark(or last) vs entry so the figure tracks the
+  // price refresh cadence instead of showing a flat -0.00.
+  const unrealizedRaw = num(position?.unrealisedPnl ?? position?.unrealizedPnl)
+  const unrealized = unrealizedRaw !== 0
+    ? unrealizedRaw
+    : (posSize && posEntry && posMark ? (posMark - posEntry) * posSize : 0)
+  const posNotional = posSize && posMark ? Math.abs(posSize * posMark) : 0
+  const posRoi = posEntry && posSize ? (unrealized / (Math.abs(posSize) * posEntry)) * 100 : 0
+  const accent = exchange === 'risex' ? '#10b981' : '#3b82f6'
 
   const marketMeta = (marketsQ.data?.markets || []).find((m: any) => m.name === market)
   const maxLev = num(marketMeta?.maxLeverage) || 50
@@ -374,8 +385,8 @@ export default function ExtendedPanel({ environment, exchange = 'extended', labe
       )}
       {/* Left column */}
       <div className="space-y-5">
-        <Panel accent="#3b82f6" className="p-5">
-          <SectionTitle sub="市场与趋势">EXTENDED</SectionTitle>
+        <Panel accent={accent} className="p-5">
+          <SectionTitle sub="市场与趋势">{label.toUpperCase()}</SectionTitle>
           <Field label="交易对">
             <Select value={form.market} onChange={(e) => set('market', e.target.value)}>
               {markets.map((m: any) => (
@@ -411,8 +422,8 @@ export default function ExtendedPanel({ environment, exchange = 'extended', labe
           <Btn variant="ghost" className="w-full mt-3" onClick={applyRecommendation}>采用推荐方向 + 动态参数</Btn>
         </Panel>
 
-        <Panel accent="#3b82f6" className="p-5">
-          <SectionTitle sub="动态虚拟网格">EXTENDED</SectionTitle>
+        <Panel accent={accent} className="p-5">
+          <SectionTitle sub="动态虚拟网格">{label.toUpperCase()}</SectionTitle>
           <div className="text-[11px] text-slate-500 mb-3 leading-relaxed">
             固定每格名义、动态格距（随 ATR）、只挂近价 {num(preview?.activeOrders, 24)} 单，价格移动时滚动挂单并保留仓位；库存超限转为单边减仓。
           </div>
@@ -508,7 +519,7 @@ export default function ExtendedPanel({ environment, exchange = 'extended', labe
       {/* Right column */}
       <div className="space-y-5">
         <Panel className="p-5">
-          <SectionTitle sub="账户状态">EXTENDED</SectionTitle>
+          <SectionTitle sub="账户状态">{label.toUpperCase()}</SectionTitle>
           {!account?.configured && (
             <div className="text-[12px] text-amber-400 bg-amber-500/10 rounded-lg px-3 py-2 mb-3">未配置 API 凭证，账户数据不可用。请在「配置」页填写。</div>
           )}
@@ -553,6 +564,32 @@ export default function ExtendedPanel({ environment, exchange = 'extended', labe
             实线=近价活跃窗口（{num(preview?.activeOrders, 24)} 单） · 虚线=虚拟层 · 格距 {preview ? fmt(preview.d) : '—'}U
           </div>
           <ReactECharts option={chartOption} style={{ height: 340 }} notMerge lazyUpdate />
+        </Panel>
+
+        <Panel className="p-5">
+          <div className="flex items-center justify-between mb-3">
+            <SectionTitle sub="每 10 秒刷新">当前持仓</SectionTitle>
+            {posSize !== 0 && (
+              <span className={`text-[11px] px-2 py-0.5 rounded ${posSize > 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                {posSize > 0 ? '多头 LONG' : '空头 SHORT'} · {market}
+              </span>
+            )}
+          </div>
+          {posSize !== 0 ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-8 gap-y-1">
+              <Row label="方向" value={posSize > 0 ? '多' : '空'} valueClass={posSize > 0 ? 'text-emerald-400' : 'text-rose-400'} />
+              <Row label="数量" value={fmt(Math.abs(posSize), 5)} />
+              <Row label="名义价值" value={posNotional ? `${fmt(posNotional)} U` : '—'} />
+              <Row label="持仓均价" value={posEntry ? fmt(posEntry) : '—'} />
+              <Row label="标记价" value={posMark ? fmt(posMark) : '—'} />
+              <Row label="未实现盈亏" value={fmtSigned(unrealized)} valueClass={pnlColor(unrealized)} />
+              <Row label="回报率" value={posEntry ? `${fmtSigned(posRoi, 2)}%` : '—'} valueClass={pnlColor(unrealized)} />
+              {num(position?.liquidationPrice) > 0 && <Row label="强平价" value={fmt(position.liquidationPrice)} valueClass="text-amber-400" />}
+              {num(position?.leverage) > 0 && <Row label="杠杆" value={`${fmt(position.leverage, 0)}x`} />}
+            </div>
+          ) : (
+            <div className="text-slate-600 py-6 text-center text-[13px]">当前无持仓</div>
+          )}
         </Panel>
 
         <Panel className="p-5">

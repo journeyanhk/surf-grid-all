@@ -182,15 +182,17 @@ async function getPositions(environment, cred) {
   const out = []
   for (const p of list) {
     let stepSize = 1
+    let markPrice = 0
     try {
       const meta = await getMarketMeta(environment, p.market_name || String(p.market_id))
       stepSize = Number(meta.step_size) || 1
+      markPrice = Number(meta.markPrice) || 0
     } catch { /* keep 1:1 if meta unavailable */ }
-    out.push(normalizePosition(p, stepSize))
+    out.push(normalizePosition(p, stepSize, markPrice))
   }
   return out
 }
-function normalizePosition(p, stepSize = 1) {
+function normalizePosition(p, stepSize = 1, markFallback = 0) {
   // RISEx returns position `size` as an int256 STRING in integer STEPS (lots),
   // positive = long, negative = short. Convert to a human base-asset quantity by
   // multiplying by the market's step_size. (Treating steps as the raw quantity is
@@ -201,12 +203,22 @@ function normalizePosition(p, stepSize = 1) {
   if (rawSteps >= 0 && (p.side === 1 || String(p.side).toLowerCase() === 'short')) {
     signed = -Math.abs(signed)
   }
+  const openPrice = Number(p.avg_entry_price ?? p.entry_price ?? p.open_price ?? 0)
+  const markPrice = Number(p.mark_price ?? p.markPrice ?? markFallback ?? 0)
+  // Use the exchange's uPnL when present; otherwise derive it from mark vs entry
+  // so the panel never shows a flat -0.00 just because the field was omitted.
+  let uPnl = Number(p.unrealized_pnl ?? p.unrealised_pnl ?? p.uPnl ?? 0)
+  if (!uPnl && signed && openPrice && markPrice) uPnl = (markPrice - openPrice) * signed
   return {
     market: p.market_name || p.market || p.config?.name || p.market_id,
     market_id: p.market_id,
     size: signed,
-    unrealisedPnl: Number(p.unrealized_pnl ?? p.unrealised_pnl ?? p.uPnl ?? 0),
-    openPrice: Number(p.avg_entry_price ?? p.entry_price ?? p.open_price ?? 0),
+    unrealisedPnl: uPnl,
+    openPrice,
+    markPrice,
+    leverage: Number(p.leverage ?? 0),
+    liquidationPrice: Number(p.liquidation_price ?? p.liq_price ?? 0),
+    marginBalance: Number(p.margin_balance ?? p.margin ?? 0),
   }
 }
 
