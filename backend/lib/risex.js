@@ -164,11 +164,15 @@ async function getCandles(environment, market, interval = 'PT1H', limit = 60) {
 async function getBalance(environment, cred) {
   const account = cred.account_address
   const b = await request(environment, `/v1/account/cross-margin-balance?account=${account}`)
-  const bal = b?.balance ?? b
-  // Normalise to { balance, equity } that the overview understands.
-  const equity = Number(bal?.equity ?? bal?.account_value ?? bal?.total_equity ?? bal?.total_collateral ?? bal?.balance ?? 0)
-  const available = Number(bal?.available ?? bal?.available_balance ?? bal?.free ?? bal?.balance ?? equity)
-  return { ...(typeof bal === 'object' ? bal : {}), balance: available, equity }
+  // Response (after unwrap) is a flat object like { balance: "1246.53..." } where
+  // balance is the cross-margin collateral as a STRING — not a nested object.
+  const obj = b && typeof b === 'object' ? b : {}
+  const collateral = Number(
+    obj.balance ?? obj.equity ?? obj.account_value ?? obj.total_equity ?? obj.total_collateral ?? 0
+  )
+  // This endpoint only reports collateral; expose it as both balance and equity
+  // so the overview / panel (which read .balance and .equity) show real numbers.
+  return { ...obj, balance: collateral, equity: collateral }
 }
 
 async function getPositions(environment, cred) {

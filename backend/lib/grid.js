@@ -326,9 +326,11 @@ async function syncOrders(cfg, cred, params, runtime, price, netQ, { placeLimit 
 
   // Place desired levels not already tracked (nearest to price first).
   // Guard every post-only rung against the LIVE book so it always rests as a
-  // maker — a SELL below the best ask (or a BUY above the best bid) would cross
-  // and get rejected. Rungs that fall inside the spread this tick are skipped and
-  // re-attempted next tick once price/grid line up.
+  // maker. A post-only order is rejected only if it would immediately TAKE
+  // liquidity — i.e. a SELL at/below the best BID, or a BUY at/above the best
+  // ASK. Rungs that fall *inside* the spread rest fine as maker and must NOT be
+  // skipped (RISEx books can be hundreds of dollars wide, so many grid rungs sit
+  // inside the spread — skipping them would leave the grid permanently short).
   let bestBid = 0
   let bestAsk = 0
   try {
@@ -342,11 +344,11 @@ async function syncOrders(cfg, cred, params, runtime, price, netQ, { placeLimit 
     .sort((a, b) => Math.abs(a.price - price) - Math.abs(b.price - price))
     .slice(0, placeLimit)
   for (const l of toPlace) {
-    if (l.side === 'SELL' && bestAsk && l.price < bestAsk) {
+    if (l.side === 'SELL' && bestBid && l.price <= bestBid) {
       skippedCross++
       continue
     }
-    if (l.side === 'BUY' && bestBid && l.price > bestBid) {
+    if (l.side === 'BUY' && bestAsk && l.price >= bestAsk) {
       skippedCross++
       continue
     }
