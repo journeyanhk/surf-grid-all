@@ -1061,4 +1061,7 @@ module.exports = {
   heartbeat,
   getConfig,
   currentPrice,
+  // exposed for the offline backtester (faithful reuse of live strategy math)
+  computeDynamicParams,
+  desiredLevels,
 }
