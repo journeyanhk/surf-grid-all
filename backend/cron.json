@@ -1,0 +1,10 @@
+[
+  {
+    "id": "grid-tick",
+    "name": "网格引擎巡检（headless 驱动 tick + 对账）",
+    "schedule": "* * * * *",
+    "handler": "cron/grid-tick.js",
+    "enabled": true,
+    "timeout": 120
+  }
+]
