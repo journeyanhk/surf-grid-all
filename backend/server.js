@@ -23,6 +23,9 @@ async function runTick() {
   ticking = true
   try {
     await grid.tickAllRunning()
+    // Throttled heartbeat so the UI run-log shows the headless scheduler is alive
+    // even during quiet ticks (no fills / no order changes write nothing).
+    await grid.heartbeat('后端')
   } catch (e) {
     console.error('[scheduler] tick error:', e && e.message ? e.message : e)
   } finally {

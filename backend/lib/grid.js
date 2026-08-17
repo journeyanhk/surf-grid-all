@@ -1029,6 +1029,25 @@ async function reconcileAllRunning() {
   return results
 }
 
+// Visible "I'm alive" line for the UI run-log so users can confirm the headless
+// backend scheduler is actually driving the engine (a quiet tick — no fills, no
+// order changes — writes nothing on its own). Throttled to one entry per running
+// config per `minGapMs` so it never spams the log.
+let _lastHeartbeatAt = 0
+async function heartbeat(source = 'backend', minGapMs = 5 * 60_000) {
+  const now = Date.now()
+  if (now - _lastHeartbeatAt < minGapMs) return { skipped: true }
+  const { rows } = await dbQuery(
+    `SELECT id, exchange, market FROM grid_configs WHERE status='running'`
+  )
+  if (!rows.length) return { running: 0 }
+  _lastHeartbeatAt = now
+  for (const r of rows) {
+    await log(r.id, r.exchange, 'info', `后台巡检运行中（${source} 调度，每 20 秒一次）· ${r.market}`)
+  }
+  return { running: rows.length }
+}
+
 module.exports = {
   computeLevels,
   startGrid,
@@ -1039,6 +1058,7 @@ module.exports = {
   tick,
   tickAllRunning,
   reconcileAllRunning,
+  heartbeat,
   getConfig,
   currentPrice,
 }
