@@ -33,7 +33,11 @@ function computeLive(form: any, atr1h: number, atr4h: number, price: number, max
   const minSpacing = num(form.min_spacing, 80)
   const Hfloor = num(form.half_range, 2000)
   const notional = num(form.grid_notional, 100)
-  const activePerSide = Math.max(2, Math.floor(num(form.active_per_side, 12)))
+  const rawActivePerSide = Math.max(2, Math.floor(num(form.active_per_side, 12)))
+  // Mirror backend: single-side resting notional ≤ hard inventory cap.
+  const maxInvForCap = num(form.max_inventory_notional, 1000)
+  const capBySide = Math.max(2, Math.floor(maxInvForCap / Math.max(notional, 1)))
+  const activePerSide = Math.min(rawActivePerSide, capBySide)
   const pxPct = aggressive ? 0.0009 : 0.0012
   const atrK = aggressive ? 0.3 : 0.4
   let d = Math.max(aggressive ? minSpacing * 0.75 : minSpacing, price * pxPct, atrK * atr1h)

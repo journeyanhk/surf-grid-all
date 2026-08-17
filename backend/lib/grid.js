@@ -138,6 +138,7 @@ function defaultRuntime() {
     halted: false,
     haltedReason: '',
     lastSlReduceAt: 0,
+    lastCapReduceAt: 0,
   }
 }
 function getRuntime(cfg) {
@@ -158,7 +159,15 @@ function computeDynamicParams(cfg, price, atr1h, atr4h) {
   const minSpacing = num(cfg.min_spacing, 80)
   const Hfloor = num(cfg.half_range, 2000)
   const notional = num(cfg.grid_notional, 100)
-  const activePerSide = Math.max(2, Math.floor(num(cfg.active_per_side, 12)))
+  const rawActivePerSide = Math.max(2, Math.floor(num(cfg.active_per_side, 12)))
+  // Safety cap: a single side's resting notional (activePerSide × grid_notional)
+  // must not exceed the HARD inventory cap — otherwise one fast sweep of all
+  // resting rungs overshoots the cap (that is exactly how the live grid drifted
+  // to ~$1200 short against a $1000 cap). Trim the effective count so the worst
+  // case sweep lands at (not beyond) the hard cap.
+  const maxInvNotional = num(cfg.max_inventory_notional, 1000)
+  const capBySide = Math.max(2, Math.floor(maxInvNotional / Math.max(notional, 1)))
+  const activePerSide = Math.min(rawActivePerSide, capBySide)
   const pxPct = aggressive ? 0.0009 : 0.0012
   const atrK = aggressive ? 0.3 : 0.4
   let d = Math.max(aggressive ? minSpacing * 0.75 : minSpacing, price * pxPct, atrK * atr1h)
@@ -510,7 +519,7 @@ async function stopGrid(configId, { closePosition = true } = {}) {
             const side = net.size > 0 ? 'SELL' : 'BUY'
             const px = side === 'SELL' ? price * 0.99 : price * 1.01
             const res = await ex.placeLimitOrder(cfg.environment, cred, {
-              market: cfg.market, side, qty: Math.abs(net.size), price: px, reduceOnly: true, timeInForce: 'GTT',
+              market: cfg.market, side, qty: Math.abs(net.size), price: px, postOnly: false, reduceOnly: true, timeInForce: 'GTT',
             })
             result.close = { ok: true, side, qty: Math.abs(net.size) }
             await log(configId, cfg.exchange, 'info', `平仓：${side} ${Math.abs(net.size)} @≈${res.price}`)
@@ -871,7 +880,7 @@ async function tickInner(configId) {
         const side = net.size > 0 ? 'SELL' : 'BUY'
         const px = side === 'SELL' ? price * 0.99 : price * 1.01
         await ex.placeLimitOrder(cfg.environment, cred, {
-          market: cfg.market, side, qty: Math.abs(net.size), price: px, reduceOnly: true, timeInForce: 'GTT',
+          market: cfg.market, side, qty: Math.abs(net.size), price: px, postOnly: false, reduceOnly: true, timeInForce: 'GTT',
         })
       } catch (e) {
         await log(configId, cfg.exchange, 'warn', `日内止损平仓失败：${e.message}`)
@@ -891,7 +900,7 @@ async function tickInner(configId) {
       const half = Math.abs(net.size) / 2
       const px = side === 'SELL' ? price * 0.99 : price * 1.01
       await ex.placeLimitOrder(cfg.environment, cred, {
-        market: cfg.market, side, qty: half, price: px, reduceOnly: true, timeInForce: 'GTT',
+        market: cfg.market, side, qty: half, price: px, postOnly: false, reduceOnly: true, timeInForce: 'GTT',
       })
       runtime.lastSlReduceAt = now
       await saveRuntime(configId, runtime)
@@ -907,7 +916,52 @@ async function tickInner(configId) {
     atrDollars(ex, cfg.environment, cfg.market, 'PT4H', price),
   ])
   const params = computeDynamicParams(cfg, price, atr1h, atr4h)
-  const macroThreshold = Math.max(price * 0.0125, 10 * spacing)
+
+  // --- Hard-cap taker reduce ---
+  // Post-only maker rungs alone can't shrink an over-cap position in a trend:
+  // the reduce-only buys sit below price and simply don't fill while the market
+  // walks away (this is exactly how the live grid held ~$1200 short against a
+  // $1000 cap). When net notional exceeds the hard cap by a meaningful margin,
+  // cross the spread with an IOC reduce-only order (postOnly:false — RISEx would
+  // otherwise silently make it post-only and reject it) to trim back to the cap.
+  const hardNotional = num(cfg.max_inventory_notional, 1000)
+  const netNotional = Math.abs(net.size) * price
+  const excessNotional = netNotional - hardNotional
+  const capReduceCooldownOk = now - num(runtime.lastCapReduceAt) > 60_000
+  const capReduceThreshold = Math.max(params.notional, hardNotional * 0.1)
+  if (net.size !== 0 && excessNotional > capReduceThreshold && capReduceCooldownOk) {
+    try {
+      let bestBid = 0
+      let bestAsk = 0
+      try {
+        ;({ bestBid, bestAsk } = await ex.getBestBidAsk(cfg.environment, cfg.market))
+      } catch {
+        /* fall back to price offsets below */
+      }
+      const side = net.size > 0 ? 'SELL' : 'BUY'
+      const reduceQty = Math.min(Math.abs(net.size), excessNotional / price)
+      const px =
+        side === 'SELL'
+          ? (bestBid ? bestBid * 0.999 : price * 0.995)
+          : (bestAsk ? bestAsk * 1.001 : price * 1.005)
+      await ex.placeLimitOrder(cfg.environment, cred, {
+        market: cfg.market,
+        side,
+        qty: reduceQty,
+        price: px,
+        postOnly: false,
+        reduceOnly: true,
+        timeInForce: 'IOC',
+      })
+      runtime.lastCapReduceAt = now
+      await saveRuntime(configId, runtime)
+      await log(configId, cfg.exchange, 'warn',
+        `库存超硬上限：净仓名义 ${netNotional.toFixed(0)}U > ${hardNotional}U，taker 减仓 ${side} ${reduceQty.toFixed(5)}`)
+    } catch (e) {
+      await log(configId, cfg.exchange, 'warn', `超上限减仓失败：${e.message}`)
+    }
+  }
+
   const nearFlat = Math.abs(net.size) <= 2 * params.q
   const lowVol = atr1hPct < 0.6
   if (nearFlat && lowVol && Math.abs(price - runtime.macroCenter) >= macroThreshold) {
@@ -961,6 +1015,20 @@ async function tickAllRunning() {
   return results
 }
 
+// Reconcile the ledger of every running config (periodic ledger self-heal).
+async function reconcileAllRunning() {
+  const { rows } = await dbQuery(`SELECT id FROM grid_configs WHERE status='running'`)
+  const results = []
+  for (const r of rows) {
+    try {
+      results.push({ id: r.id, ...(await reconcileOrders(r.id)) })
+    } catch (e) {
+      results.push({ id: r.id, error: e.message })
+    }
+  }
+  return results
+}
+
 module.exports = {
   computeLevels,
   startGrid,
@@ -970,6 +1038,7 @@ module.exports = {
   computePreview,
   tick,
   tickAllRunning,
+  reconcileAllRunning,
   getConfig,
   currentPrice,
 }
