@@ -12,7 +12,7 @@
 //      inventory caps, taker-reduce and stops order-by-order.
 //
 // Extended maker/taker fees. Run: node backend/sim/backtest.js
-const { computeDynamicParams, desiredLevels } = require('../lib/grid')
+const { computeDynamicParams, desiredLevels, invUpdateOnFill, invResyncToNet } = require('../lib/grid')
 
 const CFG = {
   style: 'aggressive', grid_notional: 100, active_per_side: 16, half_range: 2000,
@@ -77,6 +77,7 @@ function dynamicEngine(path, { takerReduce = true } = {}) {
   let takerReduceCount = 0, takerReduceRealized = 0, stopDaily = 0, stopUnreal = 0
   let maxLong = 0, maxShort = 0, eqPeak = 0, maxDD = 0
   let lastCap = -999, lastSl = -999, dailyStart = 0, halted = false
+  const inv = {} // per-line inventory, mirrors the live engine's runtime.inv
   const ledger = []
   const costBasis = () => { let c = 0; for (const l of lots) c += l.price * l.qty; return c }
   const uPnl = (p) => p * position - costBasis()
@@ -101,8 +102,8 @@ function dynamicEngine(path, { takerReduce = true } = {}) {
   for (let t = 0; t < N; t++) {
     const price = path[t]
     if (t % MPD === 0) { dailyStart = grossRealized; halted = false }
-    if (price < prev) { for (const [k, o] of [...orders.entries()].filter(([, o]) => o.side === 'BUY' && o.price >= price).sort((a, b) => b[1].price - a[1].price)) { orders.delete(k); fill('BUY', o.price, o.qty, MAKER, 'maker', t) } }
-    else if (price > prev) { for (const [k, o] of [...orders.entries()].filter(([, o]) => o.side === 'SELL' && o.price <= price).sort((a, b) => a[1].price - b[1].price)) { orders.delete(k); fill('SELL', o.price, o.qty, MAKER, 'maker', t) } }
+    if (price < prev) { for (const [k, o] of [...orders.entries()].filter(([, o]) => o.side === 'BUY' && o.price >= price).sort((a, b) => b[1].price - a[1].price)) { orders.delete(k); invUpdateOnFill(inv, 'BUY', Number(k.split(':')[1])); fill('BUY', o.price, o.qty, MAKER, 'maker', t) } }
+    else if (price > prev) { for (const [k, o] of [...orders.entries()].filter(([, o]) => o.side === 'SELL' && o.price <= price).sort((a, b) => a[1].price - b[1].price)) { orders.delete(k); invUpdateOnFill(inv, 'SELL', Number(k.split(':')[1])); fill('SELL', o.price, o.qty, MAKER, 'maker', t) } }
     prev = price
     const params = computeDynamicParams(CFG, price, ATR1H, ATR4H)
     const q = params.q, net = position
@@ -118,7 +119,9 @@ function dynamicEngine(path, { takerReduce = true } = {}) {
     if (CFG.sl_daily > 0 && daily <= -CFG.sl_daily && !halted) { if (net !== 0) { const s = net > 0 ? 'SELL' : 'BUY'; fill(s, s === 'SELL' ? price * 0.999 : price * 1.001, Math.abs(net), TAKER, 'stop-daily', t) } orders.clear(); halted = true; stopDaily++ }
     if (halted) { const eq = cash + position * price; if (eq > eqPeak) eqPeak = eq; if (eqPeak - eq > maxDD) maxDD = eqPeak - eq; continue }
     if (CFG.sl_unreal > 0 && u <= -CFG.sl_unreal && net !== 0 && t - lastSl >= 5) { const s = net > 0 ? 'SELL' : 'BUY'; fill(s, s === 'SELL' ? price * 0.999 : price * 1.001, Math.abs(net) / 2, TAKER, 'stop-unreal', t); lastSl = t; stopUnreal++ }
-    const { levels } = desiredLevels(CFG, params, macroCenter, spacing, price, position)
+    const kcNow = Math.round((price - macroCenter) / spacing)
+    invResyncToNet(inv, Math.round(position / (params.q || 1e-9)), kcNow)
+    const { levels } = desiredLevels(CFG, params, macroCenter, spacing, price, inv)
     const want = new Set(levels.map((l) => `${l.side}:${l.k}`))
     for (const k of [...orders.keys()]) if (!want.has(k)) orders.delete(k)
     for (const l of levels) { const key = `${l.side}:${l.k}`; if (orders.has(key)) continue; if (l.side === 'BUY' && l.price >= price) continue; if (l.side === 'SELL' && l.price <= price) continue; orders.set(key, { side: l.side, price: l.price, qty: q }) }

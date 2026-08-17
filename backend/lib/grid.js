@@ -139,6 +139,9 @@ function defaultRuntime() {
     haltedReason: '',
     lastSlReduceAt: 0,
     lastCapReduceAt: 0,
+    // Per-line inventory for fixed take-profit pairing: { [k]: signedLots }
+    // (+N = N long q-lots opened at grid line k; -N = N short lots at k).
+    inv: {},
   }
 }
 function getRuntime(cfg) {
@@ -182,57 +185,107 @@ function computeDynamicParams(cfg, price, atr1h, atr4h) {
   return { d, H, q, Qsoft, Qhard, virtualCount, activePerSide, notional }
 }
 
-// Desired near-price order window: activePerSide buys below Cq, activePerSide
-// sells above Cq, aligned to macroCenter + k×spacing. Applies inventory skew,
-// soft/hard caps and directional (long/short) inventory limits.
-function desiredLevels(cfg, params, macroCenter, spacing, price, netQ) {
-  const { Qsoft, Qhard, q, activePerSide, H } = params
-  const skew = clamp(netQ / (Qhard || 1e-9), -1, 1) * 3 * spacing
-  const Cq = price - skew
-  const kc = Math.round((Cq - macroCenter) / spacing)
-  const gridType = cfg.grid_type
-  const absQ = Math.abs(netQ)
-  const hardHit = absQ >= Qhard
-  const out = []
-  const eps = q * 0.5
+// ---- Fixed take-profit pairing (the grid's core edge) ----
+// Inventory is tracked per grid line so every open lot has a take-profit resting
+// exactly one spacing better than its entry — a long bought at line k is closed
+// ONLY by a sell at line k+1 (+spacing), never below entry. This is what a real
+// grid does; the previous "quote ±spacing around spot" logic closed longs on any
+// small retrace at a loss (high-buy / low-sell) and bled money.
+function invNetLots(inv) {
+  let n = 0
+  for (const k in inv) n += inv[k]
+  return n
+}
+// Apply a fill to the inventory map. A BUY at line k is a take-profit if we hold
+// a short lot at k+1 (closes it); otherwise it opens a long lot at k. Symmetric
+// for SELL. Returns { tp } so realized PnL is booked ONLY on real closes.
+function invUpdateOnFill(inv, side, k) {
+  if (side === 'BUY') {
+    if ((inv[k + 1] || 0) < 0) { inv[k + 1] += 1; if (!inv[k + 1]) delete inv[k + 1]; return { tp: true } }
+    inv[k] = (inv[k] || 0) + 1; if (!inv[k]) delete inv[k]; return { tp: false }
+  }
+  if ((inv[k - 1] || 0) > 0) { inv[k - 1] -= 1; if (!inv[k - 1]) delete inv[k - 1]; return { tp: true } }
+  inv[k] = (inv[k] || 0) - 1; if (!inv[k]) delete inv[k]; return { tp: false }
+}
+// Correct the inventory map so its net lots match the exchange-authoritative net
+// (handles missed fills, adoptions, stop/taker reduces). Preserves existing
+// pairing where possible; when trimming, drops the worst (deepest) lots first.
+function invResyncToNet(inv, targetLots, kc) {
+  let cur = invNetLots(inv)
+  let guard = 0
+  while (cur !== targetLots && guard++ < 10000) {
+    if (cur > targetLots) {
+      // need to reduce net: drop a long lot (highest line) else add a short at kc
+      const longs = Object.keys(inv).map(Number).filter((k) => inv[k] > 0)
+      if (longs.length) { const k = Math.max(...longs); inv[k] -= 1; if (!inv[k]) delete inv[k] }
+      else { inv[kc] = (inv[kc] || 0) - 1; if (!inv[kc]) delete inv[kc] }
+      cur--
+    } else {
+      // need to raise net: drop a short lot (lowest line) else add a long at kc
+      const shorts = Object.keys(inv).map(Number).filter((k) => inv[k] < 0)
+      if (shorts.length) { const k = Math.min(...shorts); inv[k] += 1; if (!inv[k]) delete inv[k] }
+      else { inv[kc] = (inv[kc] || 0) + 1; if (!inv[kc]) delete inv[kc] }
+      cur++
+    }
+  }
+}
 
-  // BUY levels below Cq
-  for (let j = 1; j <= activePerSide; j++) {
-    const k = kc - j
-    const p = +(macroCenter + k * spacing).toFixed(2)
-    if (p >= price) continue // must rest below price (post-only)
-    if (Math.abs(p - macroCenter) > H) continue
-    let allow = true
-    let reduceOnly = false
-    if (hardHit) {
-      allow = netQ < 0 // only reduce: a buy reduces a short
-      reduceOnly = true
-    } else if (netQ >= Qsoft) {
-      allow = false // soft cap: stop adding to long
-    } else if (gridType === 'short' && netQ >= -eps) {
-      allow = false // short grid: don't buy unless covering a short
+// Desired order set = take-profit exits for every open lot (always) + new grid
+// entries near price (subject to soft/hard inventory caps, grid direction and the
+// active window). Fixed pairing means exits rest at entry±spacing, so each closed
+// grid captures exactly one spacing.
+function desiredLevels(cfg, params, macroCenter, spacing, price, inv) {
+  const { Qsoft, Qhard, q, activePerSide, H } = params
+  const gridType = cfg.grid_type
+  const netQ = invNetLots(inv) * q
+  const hardHit = Math.abs(netQ) >= Qhard
+  const kc = Math.round((price - macroCenter) / spacing)
+  const out = []
+  const occupied = new Set()
+
+  // 1) Take-profit exits for every open lot (always placed — they only reduce risk).
+  for (const key in inv) {
+    const k = Number(key)
+    const lots = inv[key]
+    if (lots > 0) {
+      const tk = k + 1
+      const p = +(macroCenter + tk * spacing).toFixed(2)
+      out.push({ k: tk, side: 'SELL', price: p, reduceOnly: true })
+      occupied.add(`SELL:${tk}`)
+    } else if (lots < 0) {
+      const tk = k - 1
+      const p = +(macroCenter + tk * spacing).toFixed(2)
+      out.push({ k: tk, side: 'BUY', price: p, reduceOnly: true })
+      occupied.add(`BUY:${tk}`)
     }
-    if (allow) out.push({ k, side: 'BUY', price: p, reduceOnly })
   }
-  // SELL levels above Cq
-  for (let j = 1; j <= activePerSide; j++) {
-    const k = kc + j
-    const p = +(macroCenter + k * spacing).toFixed(2)
-    if (p <= price) continue
-    if (Math.abs(p - macroCenter) > H) continue
-    let allow = true
-    let reduceOnly = false
-    if (hardHit) {
-      allow = netQ > 0 // only reduce: a sell reduces a long
-      reduceOnly = true
-    } else if (netQ <= -Qsoft) {
-      allow = false // soft cap: stop adding to short
-    } else if (gridType === 'long' && netQ <= eps) {
-      allow = false // long grid: only sell to take profit on a long
+
+  // 2) New entries near price, only where no lot is already held on that line.
+  const allowLongEntry = !hardHit && netQ < Qsoft && gridType !== 'short'
+  const allowShortEntry = !hardHit && netQ > -Qsoft && gridType !== 'long'
+  if (allowLongEntry) {
+    for (let j = 1; j <= activePerSide; j++) {
+      const k = kc - j
+      const p = +(macroCenter + k * spacing).toFixed(2)
+      if (p >= price) continue // rest below price (post-only maker)
+      if (Math.abs(p - macroCenter) > H) continue
+      if ((inv[k] || 0) !== 0) continue
+      if (occupied.has(`BUY:${k}`)) continue
+      out.push({ k, side: 'BUY', price: p, reduceOnly: false })
     }
-    if (allow) out.push({ k, side: 'SELL', price: p, reduceOnly })
   }
-  return { levels: out, Cq, kc, hardHit }
+  if (allowShortEntry) {
+    for (let j = 1; j <= activePerSide; j++) {
+      const k = kc + j
+      const p = +(macroCenter + k * spacing).toFixed(2)
+      if (p <= price) continue // rest above price (post-only maker)
+      if (Math.abs(p - macroCenter) > H) continue
+      if ((inv[k] || 0) !== 0) continue
+      if (occupied.has(`SELL:${k}`)) continue
+      out.push({ k, side: 'SELL', price: p, reduceOnly: false })
+    }
+  }
+  return { levels: out, kc, hardHit }
 }
 
 // Cancel a single tracked order reliably. Prefers our exact externalId (the
@@ -299,7 +352,12 @@ async function ensureAllCancelled(cfg, cred) {
 // longer wanted, places missing ones. Returns { placed, cancelled, errors }.
 async function syncOrders(cfg, cred, params, runtime, price, netQ, { placeLimit = 8 } = {}) {
   const ex = getExchange(cfg.exchange)
-  const { levels } = desiredLevels(cfg, params, runtime.macroCenter, runtime.spacing, price, netQ)
+  // Keep the per-line inventory map honest against the exchange-authoritative net
+  // (covers missed fills / adoptions / risk reduces), then derive the desired set.
+  if (!runtime.inv || typeof runtime.inv !== 'object') runtime.inv = {}
+  const kc = Math.round((price - runtime.macroCenter) / runtime.spacing)
+  invResyncToNet(runtime.inv, Math.round(netQ / (params.q || 1e-9)), kc)
+  const { levels } = desiredLevels(cfg, params, runtime.macroCenter, runtime.spacing, price, runtime.inv)
   const qty = params.q
 
   // Live open orders on the DEX.
@@ -809,7 +867,7 @@ async function tickInner(configId) {
   const tradesKnown = filledExt.size > 0
 
   const spacing = runtime.spacing
-  const bookProfitSide = cfg.grid_type === 'short' ? 'BUY' : 'SELL'
+  if (!runtime.inv || typeof runtime.inv !== 'object') runtime.inv = {}
   let fills = 0
   let rejected = 0
   let realizedDelta = 0
@@ -830,7 +888,11 @@ async function tickInner(configId) {
        VALUES ($1,$2,$3,$4,$5,$6,$7)`,
       [configId, cfg.exchange, cfg.market, t.side, t.price, t.qty, t.external_id]
     )
-    if (t.side === bookProfitSide) {
+    // Update per-line inventory. Realized profit is booked ONLY when a fill is a
+    // genuine take-profit close (one spacing captured) — entries book nothing.
+    // This also fixes the old over-counting where every sell was logged as +spacing.
+    const upd = invUpdateOnFill(runtime.inv, t.side, Number(t.level))
+    if (upd.tp) {
       realizedDelta += spacing * num(t.qty)
       profitGrids++
     }
@@ -842,6 +904,7 @@ async function tickInner(configId) {
          updated_at=now() WHERE id=$1`,
       [configId, realizedDelta, volumeDelta, profitGrids]
     )
+    await saveRuntime(configId, runtime) // persist inventory map immediately
   }
 
   // --- Inventory + risk ---
@@ -1064,4 +1127,7 @@ module.exports = {
   // exposed for the offline backtester (faithful reuse of live strategy math)
   computeDynamicParams,
   desiredLevels,
+  invUpdateOnFill,
+  invResyncToNet,
+  invNetLots,
 }
